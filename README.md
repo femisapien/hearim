@@ -28,6 +28,15 @@ supervised alternative when gold labels exist, optional tokens such as
 `<answer-a>`, calibration, and why fine-tuning is chiefly a tool for output
 stability rather than a requirement.
 
+**[Answering typed questions with embedding distance — paper/embedding-scored-jev.pdf](paper/embedding-scored-jev.pdf)**
+(source: [embedding-scored-jev.tex](paper/embedding-scored-jev.tex)) — whether
+cosine similarity from an embedding model can stand in for label
+log-probabilities. Measured on one machine: it matches a 27B model on topic
+and intent questions and handles 77 options, falls far behind on entailment
+and sentiment, a trained head does not transfer to unseen schemas, and
+labeled exemplars or encoder-only fine-tuning adapt the route within those
+limits.
+
 ### The name
 
 **헤아림** is the nominal form of the Korean verb **헤아리다**, which carries

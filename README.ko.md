@@ -25,6 +25,14 @@ reasoning 토큰이 능력 부족이 아니라 chat 서피스 아티팩트인 �
 `<answer-a>` 같은 선택적 추가 토큰, calibration, 그리고 파인튜닝이 필수
 조건이 아니라 주로 출력 안정성을 위한 도구인 이유를 설명한다.
 
+**[임베딩 거리로 typed 질문에 답하기 — paper/embedding-scored-jev.pdf](paper/embedding-scored-jev.pdf)**
+(소스: [embedding-scored-jev.tex](paper/embedding-scored-jev.tex)) — 임베딩
+모델의 코사인 유사도가 라벨 logprob을 대신할 수 있는지 장비 한 대에서 잰
+결과. 주제·의도 질문에서는 27B 모델과 비슷하고 선택지 77개도 처리하지만,
+함의·감성 판정에서는 크게 뒤진다. 학습된 헤드는 처음 보는 스키마로 옮겨가지
+않으며, 라벨 붙은 예시와 인코더만의 미세조정이 그 한계 안에서 경로를
+적응시킨다.
+
 ### 이름의 뜻
 
 **헤아림**은 동사 **헤아리다**의 명사형으로, 두 가지 얽힌 뜻을 갖는다:

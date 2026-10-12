@@ -1,0 +1,407 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{kotex}
+% \usepackage{microtype} % disabled: bitmap Hangul fonts break font expansion
+
+\title{Answering Typed Questions with Embedding Distance\\
+\large Where Cosine Similarity Can Stand in for Label Log-Probabilities, and Where It Cannot}
+\author{Jioh Jung\\ \texttt{ziozzang@skku.edu}}
+\date{October 12, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+hearim answers Jev-style typed questions (\texttt{choice}, \texttt{score},
+\texttt{noul}) by reading the log-probabilities of single-token labels at one
+decode position. This paper asks whether that call can be replaced by an
+embedding model: embed the state, embed each option, and turn cosine
+similarities into a distribution. On one machine we measure three things.
+First, a published embedding model fine-tuned for typed decisions reproduces
+its reported accuracy on its own benchmark (0.763), but about twenty points of
+that come from a trained head, and on seven corpora with unseen schemas the
+head is worse than the plain cosine of the same encoder every time. Second,
+plain cosine similarity matches a 27B language model's label log-probabilities
+on topic classification (AG News, 0.85 against 0.85) and handles a 77-way
+intent question that the single-token route cannot express, but it collapses
+on judgments that need reasoning (Korean NLI 0.33 against 0.93; SST-2 0.69
+against 0.96). Third, two cheap ways of adapting the embedding route work
+inside those limits: labeled exemplars used as anchors (Banking77, 0.77 to
+0.89 with no training) and fine-tuning the encoder alone (trained schemas
+gain 10 to 23 points), where training on a single schema family damages the
+others. The conclusion is that embedding distance is a useful additional
+route for topic and intent questions and not a replacement for log-probability
+scoring. hearim now ships it as an opt-in route over five embeddings wire
+formats.
+\end{abstract}
+
+\section{Question}
+
+A typed question asks for a distribution over a declared set of options given
+some state. The companion paper~\cite{hearim} obtains that distribution from a
+generative model: options are mapped to single-token labels and the answer is
+the conditional softmax of the label log-probabilities at one position. The
+method is exact for the model, but each question costs a forward pass of a
+large model, and the number of options is bounded by the labels that are
+stable single tokens.
+
+Embedding models suggest a cheaper reading. If the state and each option are
+mapped into one vector space, the options nearest the state are the likely
+answers, and distances can be normalized into probabilities. A model built on
+this idea, fine-tuned for typed decisions~\cite{egtd}, reports accuracy above
+the hosted Jev model on a public benchmark~\cite{td}. The practical questions
+for a gateway that accepts arbitrary schemas are:
+
+\begin{enumerate}
+\item Does that model's accuracy come from distance, or from what was trained
+on top of it?
+\item How far does distance alone go with a general embedding model, compared
+with label log-probabilities on the same records?
+\item Can the route be adapted cheaply, without the adaptation tying it to one
+schema?
+\end{enumerate}
+
+\section{Method}
+
+\subsection{Scoring by distance}
+
+For one question, let $x$ be the instructions followed by the state, and
+$o_1,\dots,o_K$ the option texts. With an encoder $e$ producing unit vectors,
+\begin{equation}
+z_i = \cos\bigl(e(x),\,e(o_i)\bigr), \qquad
+p_i = \frac{\exp(z_i/\tau)}{\sum_j \exp(z_j/\tau)} .
+\label{eq:cos}
+\end{equation}
+The option text is ``name: description'' for \texttt{choice}, the level
+description for \texttt{score}, and the true and false descriptions for
+\texttt{noul}. A structured state is flattened into readable lines
+(\texttt{trace summary · tool errors: 1}) because embedding models read those
+better than raw JSON. The three primitives are then reduced as on the
+log-probability route: argmax, probability-weighted level, and $P(\text{true})$.
+
+Two properties follow directly from Eq.~\eqref{eq:cos}. There is no label
+alphabet, so $K$ is unbounded. And $p$ is a temperature-scaled similarity
+ranking, not a model's belief about the answer: $\tau$ decides how sharp it
+is, and nothing in the encoder was trained to make it calibrated.
+
+\subsection{Decomposing the fine-tuned model}
+
+The model of~\cite{egtd} scores an option as
+\[
+\text{logit}_i = \underbrace{s\cdot\cos\bigl(o_i,\ \mathrm{norm}(e(\text{state})+e(\text{question}))\bigr)}_{\text{prior}}
+\;+\; \sigma(g)\cdot\bigl(\text{joint}_i+\text{residual}_i\bigr),
+\]
+where the second term is a trained head of about 0.5M parameters over
+projections of the three embeddings. We evaluate the full model, the prior
+term alone, and Eq.~\eqref{eq:cos} computed with the model's encoder, which is
+what a client of a standard embeddings API could do.
+
+\subsection{Anchors}
+
+An anchor is a labeled record: a state whose answer to a question is known.
+With $k$ exemplar states $s_{i1},\dots,s_{ik}$ stored for option $i$,
+\begin{equation}
+a_i = \tau_e \log \frac{1}{k}\sum_{j}\exp\!\Bigl(\cos\bigl(e(s),e(s_{ij})\bigr)/\tau_e\Bigr),
+\qquad z_i \leftarrow z_i + \lambda\,(a_i-\bar a),
+\end{equation}
+where $\bar a$ is the mean over options that have exemplars; options without
+any are left unchanged. As $\tau_e\to 0$ this is the nearest exemplar, and for
+large $\tau_e$ the class mean. No weights are trained. We use
+$\tau_e=\tau=0.05$ and $\lambda=1$ throughout, without tuning.
+
+\subsection{Encoder fine-tuning}
+
+The alternative to a head is to train the encoder on the serving objective
+itself: cross-entropy of Eq.~\eqref{eq:cos} against the gold option, within
+each question, so the other options act as hard negatives. The result is an
+ordinary embedding model that any embeddings server can host. We train
+\texttt{embeddinggemma-300m}~\cite{eg} with AdamW at $2\times10^{-5}$,
+batch 16, $\tau=0.05$.
+
+\subsection{Setup}
+
+All measurements are from one Apple M2 Ultra.
+
+\paragraph{Corpora.} The in-domain benchmark is the test split of
+\texttt{typed-decisions}~\cite{td} (400 cases, 2{,}000 decisions over four
+workflows). For unseen schemas we draw 150 records each from seven public
+datasets and phrase them as typed questions: AG News~\cite{zhang} (4-way
+\texttt{choice}), Emotion~\cite{emotion} (6-way), Banking77~\cite{banking}
+(77-way, option names only), SST-2~\cite{sst} (\texttt{noul}), Yelp
+stars~\cite{zhang} (5-level \texttt{score}), and from KLUE~\cite{klue} the
+Korean YNAT topics (7-way) and NLI (3-way). Exemplar pools are drawn from the
+same sources, disjoint from the evaluation records, at most 16 per option.
+
+\paragraph{Log-probability reference.} The same records are scored with the
+method of~\cite{hearim} on a local Qwen3.8-27B (Q8) served by llama.cpp:
+options are shown with letter labels and the label log-probabilities at one
+position are normalized. The calls were made directly against the server with
+a prompt written for this study, not through hearim's own template; hearim's
+benchmark command on this particular server fell back to a grammar-constrained
+path and returned near-chance answers, which is a separate defect.
+
+\paragraph{Embedding models.} \texttt{embeddinggemma-300m} and
+\texttt{embeddinggemma-2}~\cite{eg} with their sentence-similarity and
+retrieval prompts, and \texttt{jina-embeddings-v5-text-small} with its
+text-matching adapter.
+
+\section{Results}
+
+\subsection{The fine-tuned model's accuracy is in its head}
+
+\begin{table}[h]\centering
+\begin{tabular}{lrrrr}
+\toprule
+Method & Accuracy & choice & noul & score \\
+\midrule
+Uniform (leaderboard) & 0.308 \\
+Prior, ignores the input (train mean) & 0.478 \\
+\midrule
+embeddinggemma-300m, cosine, classification prompt & 0.395 & 0.218 & 0.578 & 0.390 \\
+embeddinggemma-300m, cosine, similarity prompt & 0.462 & 0.428 & 0.580 & 0.398 \\
+Fine-tuned encoder, prior term only & 0.551 & 0.582 & 0.660 & 0.448 \\
+Fine-tuned encoder, cosine (Eq.~\ref{eq:cos}) & 0.573 & 0.562 & 0.677 & 0.504 \\
+\textbf{Fine-tuned model, encoder + head} & \textbf{0.763} & 0.712 & 0.848 & 0.739 \\
+\midrule
+TypeSafe Jev 1.13.0 (leaderboard, not re-run) & 0.727 \\
+\bottomrule
+\end{tabular}
+\caption{\texttt{typed-decisions} test, 2{,}000 decisions. The fine-tuned
+model was trained on this benchmark's train split.}
+\label{tab:td}
+\end{table}
+
+The reported figure (76.4\%) reproduces. With the head removed, the same
+encoder reaches 0.55 to 0.57, and a general embedding model does not beat the
+input-blind prior. The questions in this benchmark (``does this agent trace
+need human review?'') combine several fields of the state; surface semantic
+similarity does not answer them.
+
+\subsection{Unseen schemas}
+
+\begin{table}[h]\centering
+\begin{tabular}{lrrrrrr}
+\toprule
+ & LLM & \multicolumn{2}{c}{Fine-tuned model} & \multicolumn{3}{c}{General embedding, cosine} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-7}
+Corpus & logprob & full & cosine & eg-300m & eg-2 & jina-v5-small \\
+\midrule
+typed-decisions (training domain) & 0.630 & \textbf{0.748} & 0.550 & 0.458 & 0.315 & 0.370 \\
+\midrule
+AG News (4) & 0.847 & 0.507 & \textbf{0.853} & 0.647 & 0.693 & 0.800 \\
+Emotion (6) & 0.460 & 0.373 & 0.580 & 0.533 & 0.567 & \textbf{0.593} \\
+Banking77 (77) & n/a & 0.433 & 0.740 & 0.773 & \textbf{0.780} & 0.507 \\
+SST-2 (noul) & \textbf{0.960} & 0.340 & 0.693 & 0.633 & 0.607 & 0.567 \\
+Yelp (score, 5) & \textbf{0.627} & 0.280 & 0.493 & 0.553 & 0.487 & 0.360 \\
+YNAT, Korean (7) & \textbf{0.707} & 0.220 & 0.527 & 0.440 & 0.547 & 0.693 \\
+NLI, Korean (3) & \textbf{0.933} & 0.320 & 0.327 & 0.293 & 0.387 & 0.280 \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy, 150 records per corpus (400 decisions for
+typed-decisions). The 77 options of Banking77 exceed the 26 single-letter
+labels, so the log-probability reference could not be run.}
+\label{tab:ood}
+\end{table}
+
+\paragraph{The trained head does not transfer.} On all seven outside corpora
+the full fine-tuned model is below the cosine of its own encoder, and on SST-2
+it is below chance. The head learned the four schemas of its benchmark.
+
+\paragraph{Distance is good at ``what is this about''.} On AG News the
+fine-tuned encoder's cosine equals the 27B model. On Banking77, general
+embedding models reach 0.77 to 0.78 zero-shot over 77 options, a question the
+single-token route cannot pose at all.
+
+\paragraph{Distance is poor at relation, polarity and synthesis.} Every
+embedding model is at chance on NLI (0.28 to 0.39) where the language model
+scores 0.933, and SST-2 separates 0.57--0.69 from 0.96. A premise and its
+contradiction, or a positive and a negative review of the same film, are near
+each other in embedding space; that is what these models are trained for.
+
+\paragraph{The route is sensitive to model and prompt.} The same Jina model
+with its classification adapter instead of text-matching scores 0.880 on
+Emotion and 0.167 on YNAT (against 0.593 and 0.693). No single default serves
+every question.
+
+\subsection{Anchors}
+
+\begin{table}[h]\centering
+\begin{tabular}{lrrrrrrrr}
+\toprule
+ & \multicolumn{4}{c}{Fine-tuned encoder} & \multicolumn{4}{c}{embeddinggemma-300m} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+Corpus & $k{=}0$ & 1 & 4 & 16 & $k{=}0$ & 1 & 4 & 16 \\
+\midrule
+typed-decisions & 0.472 & 0.510 & 0.600 & 0.578 & 0.458 & 0.430 & 0.470 & 0.475 \\
+AG News & 0.840 & 0.713 & 0.820 & 0.833 & 0.647 & 0.647 & 0.780 & 0.793 \\
+Emotion & 0.527 & 0.567 & 0.533 & 0.553 & 0.533 & 0.500 & 0.560 & 0.540 \\
+Banking77 & 0.780 & 0.907 & 0.927 & 0.927 & 0.773 & 0.820 & 0.880 & 0.887 \\
+SST-2 & 0.667 & 0.780 & 0.747 & 0.720 & 0.633 & 0.767 & 0.780 & 0.787 \\
+Yelp & 0.567 & 0.587 & 0.573 & 0.553 & 0.553 & 0.500 & 0.547 & 0.520 \\
+YNAT, Korean & 0.407 & 0.500 & 0.567 & 0.567 & 0.440 & 0.447 & 0.613 & 0.593 \\
+NLI, Korean & 0.327 & 0.313 & 0.327 & 0.260 & 0.293 & 0.307 & 0.373 & 0.340 \\
+\bottomrule
+\end{tabular}
+\caption{Accuracy with $k$ exemplars per option. $k{=}0$ is zero-shot. The
+fine-tuned encoder is rendered here without the model's own text prefixes, so
+its $k{=}0$ column differs slightly from Table~\ref{tab:ood}.}
+\label{tab:anchor}
+\end{table}
+
+Anchors help where ``similar text, same answer'' holds. Banking77 rises from
+0.78 to 0.91 with one exemplar per intent and to 0.93 with four, and the mean
+negative log-likelihood falls from 1.97 to 0.45. SST-2 and YNAT gain 5 to 15
+points. Emotion and Yelp do not move beyond sampling error, and NLI stays at
+chance: anchors shift boundaries the encoder already draws and add none. Most
+of the gain arrives by four exemplars per option.
+
+\subsection{Fine-tuning the encoder}
+
+\begin{table}[h]\centering
+\begin{tabular}{lrrr}
+\toprule
+Corpus & Base & Specialist & Mixed \\
+\midrule
+typed-decisions & 0.463 & \textbf{0.693}$^{\dagger}$ & 0.568$^{\dagger}$ \\
+AG News & 0.647 & 0.647 & \textbf{0.820}$^{\dagger}$ \\
+Emotion & 0.533 & 0.387 & \textbf{0.633}$^{\dagger}$ \\
+Banking77 & 0.773 & 0.467 & \textbf{0.853}$^{\dagger}$ \\
+\midrule
+SST-2 & 0.633 & \textbf{0.733} & 0.707 \\
+Yelp & \textbf{0.553} & 0.407 & 0.453 \\
+YNAT, Korean & 0.440 & 0.540 & \textbf{0.693} \\
+NLI, Korean & \textbf{0.327} & \textbf{0.327} & 0.287 \\
+\bottomrule
+\end{tabular}
+\caption{\texttt{embeddinggemma-300m} before and after encoder-only
+fine-tuning, one seed. \emph{Specialist}: 3{,}000 typed-decisions records,
+3 epochs. \emph{Mixed}: 2{,}392 records from typed-decisions, AG News, Emotion
+and Banking77, 2 epochs. $^{\dagger}$ marks corpora whose schema was in the
+training data (records are disjoint from evaluation).}
+\label{tab:ft}
+\end{table}
+
+Encoder-only training recovers most of what the head gave in-domain (0.693
+against 0.748 on the same 400 decisions) while remaining a plain embedding
+model. It is not automatically general. The specialist lost 31 points on
+Banking77 and about 15 on Emotion and Yelp. Mixing four task families removed
+that collapse, raised every trained schema, and carried over to two of the
+four corpora it never saw (SST-2 and the Korean topic task, the latter by 25
+points from English topic data), while Yelp fell by 10. NLI did not move. A
+model trained on one schema family should be treated as a specialist and
+routed by its own name. The model served through hearim reproduced the
+training script's accuracy exactly (Banking77 0.853, AG News 0.820, YNAT
+0.693), confirming that training and serving render the same text.
+
+\subsection{Latency}
+
+One request with cached option embeddings took 34 to 46\,ms (p50) through the
+embedding route. The log-probability reference took 2.4 to 6.9\,s (p50) under
+an eight-way parallel load on a server shared with other work, so only the
+order of magnitude is meaningful: about two.
+
+\section{What this means for a gateway}
+
+\paragraph{Do not replace.} Substituting embedding distance for label
+log-probabilities would cost 30 to 60 points on entailment, sentiment and
+compound-state judgments. The fine-tuned head is not a way around this: it
+buys accuracy on the schemas it saw and loses it everywhere else.
+
+\paragraph{Do add.} For questions that ask what a text is about, the
+embedding route can match a 27B model (AG News, with the better encoders),
+is two orders of magnitude faster, and is unbounded in option count. hearim exposes it as an opt-in route: a
+model declared as an embedding model is scored by Eq.~\eqref{eq:cos} through
+the provider's embeddings API (OpenAI-style, TEI, Ollama, Cohere or Gemini
+formats), and a request uses it only by naming that model. Nothing in these
+measurements would justify choosing the route automatically from the question.
+
+\paragraph{Adapt with examples first.} Anchors are per-question, reversible,
+and need one to four records per option where they help at all. Fine-tuning is
+worth its cost when a schema family is stable and has a few thousand labeled
+records; it should then be trained as the encoder alone, on a mixture if the
+model must serve other questions too.
+
+\section{Limitations}
+
+Each outside corpus has 150 records, so a 95\% interval on accuracy is roughly
+$\pm 7$ points, and sampling used one seed; differences under five points in
+Tables~\ref{tab:anchor} and~\ref{tab:ft} carry no weight. The log-probability
+reference is one model with one prompt. Exemplar pools are disjoint from the
+evaluation records but come from the same source split. Fine-tuning results
+are single runs. $\tau_e$ and $\lambda$ were fixed, so the anchor figures are
+closer to a lower bound. Some public datasets may be in the embedding models'
+training data, which would make their zero-shot figures optimistic; the Jina
+classification adapter's 0.880 on Emotion looks like such a case, though we
+did not verify it. Calibration quality was not measured for the embedding
+route, and \texttt{score} questions were trained with hard labels, ignoring
+the order of levels. The Cohere and Gemini wire formats in the implementation
+were tested against servers imitating the documented shapes, not against the
+services.
+
+\section{Conclusion}
+
+Cosine similarity between an embedded state and embedded options is a
+legitimate way to answer a typed question when the question is about topic or
+intent, and it then brings speed and an unbounded option set that single-token
+scoring lacks. It is not a way to answer questions that require reading a
+relation between texts or weighing several facts, and no amount of anchoring
+or encoder training in these experiments changed that. The useful design is
+therefore both routes side by side, selected by the caller, with labeled
+examples as the first adaptation tool and encoder-only fine-tuning as the
+second.
+
+\begin{thebibliography}{9}
+
+\bibitem{hearim}
+Jioh Jung.
+\newblock \emph{hearim: Turning Generation APIs into Probability Oracles---A
+Jev-Compatible Reimplementation of Single-Token Label Scoring}.
+\newblock 2026. Companion paper in this repository.
+
+\bibitem{egtd}
+\newblock \emph{EmbeddingGemma 2 fine-tuned for typed decisions}.
+\newblock Model card, 2026.
+\newblock \url{https://huggingface.co/mrm8488/embeddinggemma-2-ft-typed-decision}.
+
+\bibitem{td}
+\newblock \emph{Typed Decisions}: a benchmark for typed probabilistic decisions.
+\newblock Dataset card, 2026.
+\newblock \url{https://huggingface.co/datasets/LocalLLaMA/typed-decisions}.
+
+\bibitem{eg}
+Google.
+\newblock \emph{EmbeddingGemma}.
+\newblock Model cards.
+\newblock \url{https://huggingface.co/google/embeddinggemma-300m}.
+
+\bibitem{zhang}
+X. Zhang, J. Zhao, and Y. LeCun.
+\newblock Character-level Convolutional Networks for Text Classification.
+\newblock \emph{arXiv:1509.01626}, 2015.
+
+\bibitem{emotion}
+E. Saravia, H.-C. T. Liu, Y.-H. Huang, J. Wu, and Y.-S. Chen.
+\newblock CARER: Contextualized Affect Representations for Emotion Recognition.
+\newblock In \emph{EMNLP}, 2018.
+
+\bibitem{banking}
+I. Casanueva, T. Tem\v{c}inas, D. Gerz, M. Henderson, and I. Vuli\'c.
+\newblock Efficient Intent Detection with Dual Sentence Encoders.
+\newblock \emph{arXiv:2003.04807}, 2020.
+
+\bibitem{sst}
+R. Socher, A. Perelygin, J. Wu, J. Chuang, C. D. Manning, A. Ng, and C. Potts.
+\newblock Recursive Deep Models for Semantic Compositionality Over a Sentiment Treebank.
+\newblock In \emph{EMNLP}, 2013.
+
+\bibitem{klue}
+S. Park et al.
+\newblock KLUE: Korean Language Understanding Evaluation.
+\newblock \emph{arXiv:2105.09680}, 2021.
+
+\end{thebibliography}
+
+\end{document}
