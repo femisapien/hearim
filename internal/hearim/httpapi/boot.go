@@ -76,12 +76,15 @@ func New(cfg *config.Config, logger *slog.Logger, registryDir string) (*Server, 
 	}
 
 	for _, pc := range cfg.Providers {
+		s.Schedulers[pc.ID] = schedule.New(pc.Concurrency, 10*time.Millisecond)
+		if pc.Engine.EmbeddingOnly() {
+			continue // no generation surface; routes carry an Embedder instead
+		}
 		adpt, err := provider.NewAdapter(pc)
 		if err != nil {
 			return nil, err
 		}
 		s.Adapters[pc.ID] = adpt
-		s.Schedulers[pc.ID] = schedule.New(pc.Concurrency, 10*time.Millisecond)
 	}
 
 	// Enumerate unique alias targets and bind routes. Chain entries
@@ -175,11 +178,14 @@ func (s *Server) providerForModel(model string) string {
 // the token label registry at boot.
 func (s *Server) buildRoute(ctx context.Context, target string) (eval.Route, error) {
 	providerID, model := splitTarget(target)
+	pcfg := s.providerConfig(providerID)
+	if emb := provider.NewEmbedder(pcfg, model); emb != nil {
+		return s.buildEmbeddingRoute(ctx, pcfg, model, emb)
+	}
 	adpt, ok := s.Adapters[providerID]
 	if !ok {
 		return eval.Route{}, fmt.Errorf("no provider %q", providerID)
 	}
-	pcfg := s.providerConfig(providerID)
 
 	// Best-effort health probe populates the engine version, which feeds the
 	// tokenizer revision of the registry key.
@@ -307,6 +313,38 @@ func (s *Server) buildRoute(ctx context.Context, target string) (eval.Route, err
 	return route, nil
 }
 
+// buildEmbeddingRoute binds an embedding-scored model: one probe call
+// verifies the embeddings API answers in the configured wire format, and
+// the anchor file (if any) is loaded and validated.
+func (s *Server) buildEmbeddingRoute(ctx context.Context, pcfg config.ProviderConfig, model string, emb *provider.Embedder) (eval.Route, error) {
+	route := eval.Route{
+		Adapter:      s.Adapters[pcfg.ID], // nil on embedding-only engines
+		ProviderID:   pcfg.ID,
+		BackendModel: model,
+		Engine:       pcfg.Engine,
+		ModelCfg:     pcfg.Models.Find(model),
+		Embedder:     emb,
+	}
+	for i, cand := range s.Cfg.Router.Candidates {
+		if cand.Model == model {
+			route.Pricing = &s.Cfg.Router.Candidates[i]
+			break
+		}
+	}
+	if path := emb.Config().Anchors; path != "" {
+		anchors, err := eval.LoadAnchors(path, s.Compiler)
+		if err != nil {
+			return eval.Route{}, err
+		}
+		route.Anchors = anchors
+		s.Logger.Info("embedding anchors loaded", "model", model, "path", path, "exemplars", anchors.Len())
+	}
+	if _, _, err := emb.Embed(ctx, provider.EmbedQuery, []string{"hearim embedding probe"}); err != nil {
+		return eval.Route{}, fmt.Errorf("embedding probe (%s api): %w", emb.API(), err)
+	}
+	return route, nil
+}
+
 // probeRequest is the fixed boot probe request (deterministic prompt).
 func probeRequest() *jev.ParsedRequest {
 	pr, err := jev.Validate([]byte(`{"model":"probe","state":"hearim token label registry probe","questions":{"probe":{"type":"noul","instructions":"Answer with the single best label for the state.","criteria":{"true":"the proposition holds","false":"the proposition does not hold"}}}}`))
@@ -341,11 +379,17 @@ func firstPreferred(prefs []config.EndpointKind) config.EndpointKind {
 }
 
 func tokenizerRevisionOf(adpt provider.Adapter) string {
+	if adpt == nil {
+		return ""
+	}
 	caps := adpt.Capabilities()
 	return caps.EngineVersion
 }
 
 func routeReady(r eval.Route) bool {
+	if r.Embedder != nil {
+		return true // bound only after its boot probe succeeded
+	}
 	if r.Registry == nil {
 		return false
 	}
@@ -375,7 +419,7 @@ func (s *Server) Ready() (bool, string) {
 			return true, ""
 		}
 	}
-	return false, "no route has a ready token label registry"
+	return false, "no route is ready (token label registry or embedding probe)"
 }
 
 // Handler returns the root HTTP handler.

@@ -29,6 +29,24 @@ type Route struct {
 	// ModelCfg carries the configured upstream LLM type (chat|thinking|
 	// vision) and per-model extra parameters.
 	ModelCfg *config.ModelConfig
+	// Embedder is set on embedding-scored routes: questions are answered by
+	// cosine similarity instead of label logprobs, and Registry stays nil.
+	Embedder *provider.Embedder
+	// Anchors holds the route's labeled exemplars (nil when none).
+	Anchors *AnchorStore
+}
+
+// Compile builds the evaluation plan the way this route scores it:
+// embedding routes need no single-token labels.
+func (r Route) Compile(c *compile.Compiler, pr *jev.ParsedRequest) (*compile.EvaluationPlan, error) {
+	if r.Embedder != nil {
+		return c.Unlabeled().Compile(pr, r.BackendModel)
+	}
+	var prompt *config.PromptConfig
+	if r.ModelCfg != nil {
+		prompt = r.ModelCfg.Prompt
+	}
+	return c.CompileWith(pr, r.BackendModel, prompt)
 }
 
 // ModelCfgThinking returns the model's thinking configuration, if any.
@@ -100,6 +118,9 @@ func New(c *compile.Compiler, cfg *config.Config) *Evaluator {
 // EvaluateQuestion scores one compiled question through the strategy chain
 // of TODO.md §3.11 and reduces it to the public answer.
 func (e *Evaluator) EvaluateQuestion(ctx context.Context, plan *compile.EvaluationPlan, qi int, route Route) (*QuestionResult, error) {
+	if route.Embedder != nil {
+		return e.evaluateEmbedding(ctx, plan, qi, route)
+	}
 	q := plan.Questions[qi]
 	caps := provider.CapabilitiesForRoute(route.Adapter, route.BackendModel, route.Endpoint)
 
@@ -521,8 +542,12 @@ func reduce(q *compile.CompiledQuestion, probs []float64, tau float64) (any, err
 
 // MetaFrom assembles response metadata.
 func MetaFrom(route Route, results []*QuestionResult, cfg *config.Config) Meta {
+	implementation := fmt.Sprintf("%s-logprob-v1", route.Engine)
+	if route.Embedder != nil {
+		implementation = fmt.Sprintf("%s-embedding-v1", route.Embedder.API())
+	}
 	m := Meta{
-		Implementation:   fmt.Sprintf("%s-logprob-v1", route.Engine),
+		Implementation:   implementation,
 		BackendModel:     route.BackendModel,
 		QuestionCalls:    len(results),
 		CachePlan:        route.CachePlan,

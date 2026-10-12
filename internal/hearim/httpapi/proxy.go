@@ -28,6 +28,11 @@ func (s *Server) handleProxy(kind string) http.HandlerFunc {
 			writeJevError(w, r, jev.NewError(jev.CodeModelNotFound, "%v", err))
 			return
 		}
+		if route.Embedder != nil {
+			writeJevError(w, r, jev.NewError(jev.CodeValidationFailed,
+				"default model %s is embedding-scored and has no completion surface; use /v1/systemone", route.BackendModel))
+			return
+		}
 		pcfg := s.providerConfig(route.ProviderID)
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxSystemOneBody))

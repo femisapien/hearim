@@ -254,7 +254,7 @@ provider로 투명 프록시한다. hearim은 일반 대화 트래픽에서 Jev 
 | 명령 | 용도 |
 |---|---|
 | `hearim serve` | 게이트웨이 실행 |
-| `hearim probe` | Phase 0 capability suite: tokenizer endpoint, logprob 형태, 단일 토큰 라벨, teacher-forced parity, hidden reasoning·캐시 증거. JSON 보고서 출력, 모든 대상이 go/no-go 게이트에 실패하면 0이 아닌 종료 코드 |
+| `hearim probe` | Phase 0 capability suite: tokenizer endpoint, logprob 형태, 단일 토큰 라벨, teacher-forced parity, hidden reasoning·캐시 증거. JSON 보고서 출력, 모든 대상이 go/no-go 게이트에 실패하면 0이 아닌 종료 코드. 임베딩 채점 모델은 대신 임베딩 호출 한 번으로 확인한다. |
 | `hearim bench` | 라벨된 JSONL 코퍼스 실행: 정확도, macro F1, NLL, Brier, ECE, candidate mass, p50/p95 지연, 라벨 순서 순열 분산(`-permutations N`) |
 | `hearim update` | GitHub 릴리즈에서 SHA256SUMS 검증 후 자가 업데이트 |
 
@@ -329,6 +329,36 @@ models:
   업스트림 요청에 추가 JSON 필드를 병합한다 — `seed`, `num_ctx` 같은
   엔진 고유 노브나 게이트웨이 전용 파라미터. 정확성에 중요한 필드
   (`logprobs`, `max_tokens`, 샘플러 값 등)는 보호되어 덮어쓸 수 없다.
+
+## 임베딩 채점 모델
+
+`type: embedding`으로 표시한 모델(또는 `tei`, `cohere`, `gemini` provider의
+모든 모델)은 logprob 대신 **임베딩 유사도**로 답한다. 각 선택지의 확률은
+임베딩한 state와 임베딩한 선택지 텍스트 사이 코사인의 softmax다. 임베딩 API
+형식은 OpenAI `/v1/embeddings`, TEI, Ollama, Cohere, Gemini 다섯 가지를
+지원한다.
+
+```yaml
+providers:
+  - id: embed-local
+    engine: generic-openai
+    base_url: http://embeddings:8080
+    models:
+      - name: embeddinggemma-300m
+        type: embedding
+        embedding:
+          query_prefix: "task: sentence similarity | query: "
+          document_prefix: "task: sentence similarity | query: "
+          # anchors: anchors.jsonl   # 라벨 붙은 예시가 가까운 state를 그 답으로 끌어당긴다
+model_aliases:
+  jev-embed: embed-local:embeddinggemma-300m
+```
+
+수십 ms 안에 답하고 라벨 알파벳 제한이 없다(선택지 77개도 가능). 대신 의미
+유사도만큼만 정확하다. 측정 결과 주제·의도 질문에서는 27B 모델의 logprob과
+비슷했고, 함의 판정과 감성 판정에서는 크게 낮았다. 이 경로는 요청이 그런
+모델을 지정했을 때만 쓰인다. 상세, 측정값, 예시 앵커, 선택적 미세조정
+레시피는 [docs/EMBEDDING.ko.md](docs/EMBEDDING.ko.md)를 참고한다.
 
 ## thinking 모델 (`<think>` 처리)
 

@@ -119,7 +119,40 @@ providers:
     selected_token_field: token_ids_logprob
     prefix_caching: radix
 
+  # Embedding-scored models (docs/EMBEDDING.md): answers come from cosine
+  # similarity between the embedded state and each embedded option — no
+  # logprobs, no label alphabet limit, tens of milliseconds. Good for
+  # topic/intent questions with many options; weak on judgments that need
+  # reasoning (entailment, sentiment polarity). Any provider can carry one:
+  # mark the model `type: embedding`.
+  - id: embed-local
+    engine: generic-openai            # OpenAI /v1/embeddings: vLLM, llama.cpp,
+    base_url: http://embeddings:8080  # Ollama, LM Studio, TEI, Jina, Voyage
+    models:
+      - name: embeddinggemma-300m
+        type: embedding
+        embedding:
+          # api: openai               # openai | tei | ollama | cohere | gemini
+          query_prefix: "task: sentence similarity | query: "
+          document_prefix: "task: sentence similarity | query: "
+          # tau: 0.05                 # softmax temperature over cosines
+          # anchors: anchors.jsonl    # labeled exemplars (bench corpus format)
+
+  # Embedding-only engines need no model list; every model is embedding-scored.
+  # - id: tei
+  #   engine: tei                     # native POST /embed
+  #   base_url: http://tei:8080
+  # - id: cohere
+  #   engine: cohere                  # POST /v2/embed (base_url defaults)
+  #   api_key: ${COHERE_API_KEY}
+  # - id: gemini
+  #   engine: gemini                  # :batchEmbedContents (base_url defaults)
+  #   api_key: ${GEMINI_API_KEY}
+
 model_aliases:
+  jev-embed: embed-local:embeddinggemma-300m
+  # jev-embed-cohere: cohere:embed-v4.0
+  # jev-embed-gemini: gemini:gemini-embedding-001
   jev-local-auto: policy:auto-v1
   jev-gemma4: ollama-cloud:gemma4:31b
   jev-deepseek-flash: ollama-cloud:deepseek-v4.1-flash

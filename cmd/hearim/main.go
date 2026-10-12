@@ -326,7 +326,25 @@ func cmdProbe(args []string) error {
 	}
 
 	reports := []*probe.Report{}
+	embeddingGo := false
 	for _, t := range targets {
+		if emb := provider.NewEmbedder(t.provider, t.model); emb != nil {
+			// Embedding-scored models have no logprob surface to probe: the
+			// gate is one embeddings call in the configured wire format.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			vecs, _, err := emb.Embed(ctx, provider.EmbedQuery, []string{"hearim embedding probe"})
+			cancel()
+			rep := map[string]any{"provider": t.provider.ID, "model": t.model, "embedding_api": emb.API(), "go": err == nil}
+			if err != nil {
+				rep["error"] = err.Error()
+			} else {
+				rep["dimensions"] = len(vecs[0])
+				embeddingGo = true
+			}
+			data, _ := json.MarshalIndent(rep, "", "  ")
+			fmt.Println(string(data))
+			continue
+		}
 		adpt, err := provider.NewAdapter(t.provider)
 		if err != nil {
 			return err
@@ -351,7 +369,7 @@ func cmdProbe(args []string) error {
 		}
 	}
 	// Exit non-zero when the Phase 0 gate fails for every target.
-	anyGo := false
+	anyGo := embeddingGo
 	for _, r := range reports {
 		if r.Summary.Go {
 			anyGo = true

@@ -48,6 +48,9 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 		Labels    int    `json:"single_token_labels"`
 		MaxExact  int    `json:"max_exact_candidates"`
 		CachePlan string `json:"cache_plan"`
+		// Embedding routes: wire format and loaded exemplar count.
+		EmbeddingAPI string `json:"embedding_api,omitempty"`
+		Anchors      int    `json:"anchors,omitempty"`
 	}
 	out := []routeView{}
 	for _, rt := range s.Routes() {
@@ -58,6 +61,11 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 			Endpoint:  string(rt.Endpoint),
 			Ready:     routeReady(rt),
 			CachePlan: rt.CachePlan,
+		}
+		if rt.Embedder != nil {
+			v.Endpoint = "embeddings"
+			v.EmbeddingAPI = rt.Embedder.API()
+			v.Anchors = rt.Anchors.Len()
 		}
 		if rt.Registry != nil {
 			v.Delimiter = displayDelimiter(rt.Registry.Delimiter)

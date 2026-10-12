@@ -266,7 +266,7 @@ OpenAI standard.
 | command | purpose |
 |---|---|
 | `hearim serve` | run the gateway |
-| `hearim probe` | Phase 0 capability suite: tokenizer endpoint, logprob shapes, single-token labels, teacher-forced parity, hidden-reasoning and cache evidence; prints a JSON report and exits non-zero when every target fails the go/no-go gate |
+| `hearim probe` | Phase 0 capability suite: tokenizer endpoint, logprob shapes, single-token labels, teacher-forced parity, hidden-reasoning and cache evidence; prints a JSON report and exits non-zero when every target fails the go/no-go gate. Embedding-scored models are probed with one embeddings call instead. |
 | `hearim bench` | run a labeled JSONL corpus: accuracy, macro F1, NLL, Brier, ECE, candidate mass, p50/p95 latency, and label-order permutation variance (`-permutations N`) |
 | `hearim update` | self-update from GitHub releases with SHA256SUMS verification |
 
@@ -352,6 +352,37 @@ models:
   like `seed`, `num_ctx`, or gateway-specific parameters. Correctness-
   critical fields (`logprobs`, `max_tokens`, sampler identity, ...) are
   protected and cannot be overridden.
+
+### Embedding-scored models
+
+A model marked `type: embedding` (or any model on a `tei`, `cohere` or
+`gemini` provider) is answered from **embedding similarity** instead of
+logprobs: each option's probability is the softmax of the cosine between the
+embedded state and the embedded option text. Five embeddings wire formats are
+supported — OpenAI `/v1/embeddings`, TEI, Ollama, Cohere, Gemini.
+
+```yaml
+providers:
+  - id: embed-local
+    engine: generic-openai
+    base_url: http://embeddings:8080
+    models:
+      - name: embeddinggemma-300m
+        type: embedding
+        embedding:
+          query_prefix: "task: sentence similarity | query: "
+          document_prefix: "task: sentence similarity | query: "
+          # anchors: anchors.jsonl   # labeled exemplars pull nearby states to their answer
+model_aliases:
+  jev-embed: embed-local:embeddinggemma-300m
+```
+
+It answers in tens of milliseconds and has no label-alphabet limit (77
+options are fine), and it is only as good as semantic similarity: measured
+accuracy was close to a 27B model's logprobs on topic and intent questions
+and far below on entailment and sentiment. The route is used only when a
+request names such a model. Details, measurements, anchors and the optional
+fine-tuning recipe: [docs/EMBEDDING.md](docs/EMBEDDING.md).
 
 ### Thinking models (`<think>` handling)
 

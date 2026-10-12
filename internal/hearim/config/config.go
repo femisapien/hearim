@@ -23,7 +23,154 @@ const (
 	EngineVLLM    EngineKind = "vllm"
 	EngineSGLang  EngineKind = "sglang"
 	EngineGeneric EngineKind = "generic-openai"
+	// Embedding-only engines: every model on such a provider is scored by
+	// embedding similarity (see EmbeddingConfig).
+	EngineTEI    EngineKind = "tei"
+	EngineCohere EngineKind = "cohere"
+	EngineGemini EngineKind = "gemini"
 )
+
+// EmbeddingOnly reports engines that expose no generation surface.
+func (e EngineKind) EmbeddingOnly() bool {
+	return e == EngineTEI || e == EngineCohere || e == EngineGemini
+}
+
+// Embedding API wire formats.
+const (
+	EmbedAPIOpenAI = "openai" // POST /v1/embeddings (vLLM, llama.cpp, Ollama, LM Studio, TEI, Jina, Voyage)
+	EmbedAPITEI    = "tei"    // POST /embed (Text Embeddings Inference native)
+	EmbedAPIOllama = "ollama" // POST /api/embed
+	EmbedAPICohere = "cohere" // POST /v2/embed
+	EmbedAPIGemini = "gemini" // POST /v1beta/models/{model}:batchEmbedContents
+)
+
+// ModelTypeEmbedding marks a model that is scored through the embedding
+// path instead of next-token logprobs.
+const ModelTypeEmbedding = "embedding"
+
+// EmbeddingConfig configures embedding-similarity scoring: each option's
+// probability comes from the cosine similarity between the embedded
+// (instructions + state) and the embedded option text. Model-level fields
+// override provider-level fields individually.
+type EmbeddingConfig struct {
+	// API selects the wire format; defaults by engine (tei/cohere/gemini
+	// engines use their own, everything else speaks OpenAI /v1/embeddings).
+	API string `yaml:"api" json:"api,omitempty"`
+	// Path overrides the embeddings URL path.
+	Path string `yaml:"path" json:"path,omitempty"`
+	// QueryPrefix / DocumentPrefix are prepended to the state-side and
+	// option-side texts — the task prompts many embedding models expect
+	// (e.g. EmbeddingGemma "task: sentence similarity | query: ").
+	QueryPrefix    string `yaml:"query_prefix" json:"query_prefix,omitempty"`
+	DocumentPrefix string `yaml:"document_prefix" json:"document_prefix,omitempty"`
+	// QueryParams / DocumentParams are merged into the request body per
+	// side (Jina "task", Voyage/Cohere "input_type", Gemini "taskType",
+	// TEI "prompt_name").
+	QueryParams    map[string]any `yaml:"query_params" json:"query_params,omitempty"`
+	DocumentParams map[string]any `yaml:"document_params" json:"document_params,omitempty"`
+	// Tau is the softmax temperature over cosine similarities (default 0.05).
+	Tau float64 `yaml:"tau" json:"tau,omitempty"`
+	// Anchors is a JSONL file of labeled exemplars in the `hearim bench`
+	// corpus format; states near an exemplar pull toward its answer.
+	Anchors string `yaml:"anchors" json:"anchors,omitempty"`
+	// AnchorWeight scales the anchor term (default 1); AnchorTau is its
+	// soft-nearest-neighbour temperature (default 0.05).
+	AnchorWeight *float64 `yaml:"anchor_weight" json:"anchor_weight,omitempty"`
+	AnchorTau    float64  `yaml:"anchor_tau" json:"anchor_tau,omitempty"`
+}
+
+// DefaultEmbedAPI returns the wire format an engine speaks by default.
+func DefaultEmbedAPI(e EngineKind) string {
+	switch e {
+	case EngineTEI:
+		return EmbedAPITEI
+	case EngineCohere:
+		return EmbedAPICohere
+	case EngineGemini:
+		return EmbedAPIGemini
+	default:
+		return EmbedAPIOpenAI
+	}
+}
+
+// EmbeddingFor resolves the effective embedding settings of a model, or nil
+// when the model is scored by logprobs. A model is an embedding model when
+// its type is "embedding" or its provider engine is embedding-only.
+func (p ProviderConfig) EmbeddingFor(model string) *EmbeddingConfig {
+	mc := p.Models.Find(model)
+	if !p.Engine.EmbeddingOnly() && (mc == nil || mc.Type != ModelTypeEmbedding) {
+		return nil
+	}
+	out := EmbeddingConfig{}
+	if p.Embedding != nil {
+		out = *p.Embedding
+	}
+	if mc != nil && mc.Embedding != nil {
+		m := mc.Embedding
+		if m.API != "" {
+			out.API = m.API
+		}
+		if m.Path != "" {
+			out.Path = m.Path
+		}
+		if m.QueryPrefix != "" {
+			out.QueryPrefix = m.QueryPrefix
+		}
+		if m.DocumentPrefix != "" {
+			out.DocumentPrefix = m.DocumentPrefix
+		}
+		if m.QueryParams != nil {
+			out.QueryParams = m.QueryParams
+		}
+		if m.DocumentParams != nil {
+			out.DocumentParams = m.DocumentParams
+		}
+		if m.Tau > 0 {
+			out.Tau = m.Tau
+		}
+		if m.Anchors != "" {
+			out.Anchors = m.Anchors
+		}
+		if m.AnchorWeight != nil {
+			out.AnchorWeight = m.AnchorWeight
+		}
+		if m.AnchorTau > 0 {
+			out.AnchorTau = m.AnchorTau
+		}
+	}
+	if out.API == "" {
+		out.API = DefaultEmbedAPI(p.Engine)
+	}
+	if out.Tau <= 0 {
+		out.Tau = 0.05
+	}
+	if out.AnchorTau <= 0 {
+		out.AnchorTau = 0.05
+	}
+	if out.AnchorWeight == nil {
+		w := 1.0
+		out.AnchorWeight = &w
+	}
+	return &out
+}
+
+func validateEmbedding(e *EmbeddingConfig) error {
+	if e == nil {
+		return nil
+	}
+	switch e.API {
+	case "", EmbedAPIOpenAI, EmbedAPITEI, EmbedAPIOllama, EmbedAPICohere, EmbedAPIGemini:
+	default:
+		return fmt.Errorf("embedding.api must be openai|tei|ollama|cohere|gemini, got %q", e.API)
+	}
+	if e.Path != "" && !strings.HasPrefix(e.Path, "/") {
+		return fmt.Errorf("embedding.path must start with /")
+	}
+	if e.Tau < 0 || e.AnchorTau < 0 {
+		return fmt.Errorf("embedding.tau and embedding.anchor_tau must be positive")
+	}
+	return nil
+}
 
 // EndpointKind identifies an upstream endpoint surface. See TODO.md §3.3.
 type EndpointKind string
@@ -167,6 +314,8 @@ type ProviderConfig struct {
 	// provider-specific keys like X-Api-Key, HTTP-Referer, X-Title.
 	// Values support ${ENV} expansion like the rest of the config.
 	Headers map[string]string `yaml:"headers" json:"headers"`
+	// Embedding holds provider-wide defaults for embedding-scored models.
+	Embedding *EmbeddingConfig `yaml:"embedding" json:"embedding,omitempty"`
 }
 
 // PathsConfig overrides upstream URL paths. All values must start with "/".
@@ -191,7 +340,11 @@ type PathsConfig struct {
 //	thinking / reasoning - reasoning traces cannot be fully disabled, so
 //	                      chat exact routes are vetoed for it (TODO.md §3.4)
 //	vision  - accepts image inputs
+//	embedding - an embedding model: questions are scored by cosine
+//	            similarity through the provider's embeddings API
 type ModelConfig struct {
+	// Embedding overrides the provider's embedding settings for this model.
+	Embedding   *EmbeddingConfig       `yaml:"embedding" json:"embedding,omitempty"`
 	Scoring     *ProviderScoringConfig `yaml:"scoring" json:"scoring,omitempty"`
 	Name        string                 `yaml:"name" json:"name"`
 	Type        string                 `yaml:"type" json:"type,omitempty"`
@@ -340,9 +493,9 @@ func (m *ModelConfigs) UnmarshalYAML(node *yaml.Node) error {
 				return fmt.Errorf("config: model entry requires a name")
 			}
 			switch mc.Type {
-			case "", "chat", "thinking", "reasoning", "vision":
+			case "", "chat", "thinking", "reasoning", "vision", ModelTypeEmbedding:
 			default:
-				return fmt.Errorf("config: model %q: unknown type %q (chat|thinking|vision)", mc.Name, mc.Type)
+				return fmt.Errorf("config: model %q: unknown type %q (chat|thinking|vision|embedding)", mc.Name, mc.Type)
 			}
 			if mc.Thinking != nil {
 				if mc.Thinking.CloseTag == "" && mc.Thinking.WaitClose && mc.Type != "" && mc.Type != "thinking" && mc.Type != "reasoning" {
@@ -591,6 +744,14 @@ func (c *Config) applyDefaults() {
 		if p.BaseURL == "" && p.Engine == EngineOllama {
 			p.BaseURL = c.Ollama.BaseURL
 		}
+		if p.BaseURL == "" && len(p.BaseURLs) == 0 {
+			switch p.Engine {
+			case EngineCohere:
+				p.BaseURL = "https://api.cohere.com"
+			case EngineGemini:
+				p.BaseURL = "https://generativelanguage.googleapis.com"
+			}
+		}
 		if len(p.EndpointPreference) == 0 {
 			p.EndpointPreference = defaultEndpointPreference(p.Engine)
 		}
@@ -758,8 +919,17 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: model %q: %w", m.Name, err)
 			}
 		}
+		if err := validateEmbedding(p.Embedding); err != nil {
+			return fmt.Errorf("config: provider %q: %w", p.ID, err)
+		}
+		for _, m := range p.Models {
+			if err := validateEmbedding(m.Embedding); err != nil {
+				return fmt.Errorf("config: model %q: %w", m.Name, err)
+			}
+		}
 		switch p.Engine {
-		case EngineOllama, EngineLlamaPP, EngineVLLM, EngineSGLang, EngineGeneric:
+		case EngineOllama, EngineLlamaPP, EngineVLLM, EngineSGLang, EngineGeneric,
+			EngineTEI, EngineCohere, EngineGemini:
 		default:
 			return fmt.Errorf("config: provider %q: unknown engine %q", p.ID, p.Engine)
 		}

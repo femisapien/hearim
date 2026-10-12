@@ -90,7 +90,7 @@ func Run(ctx context.Context, recs []Record, route eval.Route, compiler *compile
 			m.Errors++
 			continue
 		}
-		plan, err := compiler.Compile(pr, route.BackendModel)
+		plan, err := route.Compile(compiler, pr)
 		if err != nil {
 			m.Errors++
 			continue
@@ -276,7 +276,7 @@ func evalChoiceProb(ctx context.Context, state json.RawMessage, q *jev.Question,
 	if err != nil {
 		return 0, err
 	}
-	plan, err := compiler.Compile(pr, route.BackendModel)
+	plan, err := route.Compile(compiler, pr)
 	if err != nil {
 		return 0, err
 	}

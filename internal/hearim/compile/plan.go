@@ -42,8 +42,12 @@ type Candidate struct {
 
 // CompiledQuestion is a single question compiled against a shared state.
 type CompiledQuestion struct {
-	ID           string
-	Type         jev.QuestionType
+	ID   string
+	Type jev.QuestionType
+	// Instructions is the question text as the client wrote it (a string
+	// instruction verbatim, structured instructions as canonical JSON).
+	// Embedding routes embed it; label routes use the rendered prompt.
+	Instructions string
 	PromptPrefix string // shared invariant prefix for this layout
 	PromptSuffix string // question-specific tail including answer marker
 	Candidates   []Candidate
@@ -78,6 +82,17 @@ type EvaluationPlan struct {
 // Compiler compiles validated requests into evaluation plans.
 type Compiler struct {
 	Config config.CompilerConfig
+	// unlabeled compiles questions without single-token answer labels.
+	unlabeled bool
+}
+
+// Unlabeled returns a compiler for routes that do not score label tokens
+// (embedding similarity): candidates carry no TokenText, so option counts
+// beyond the label alphabets compile instead of being rejected.
+func (c *Compiler) Unlabeled() *Compiler {
+	cc := *c
+	cc.unlabeled = true
+	return &cc
 }
 
 // New creates a compiler from configuration.
@@ -282,10 +297,14 @@ func (c *Compiler) compileQuestion(q *jev.ParsedQuestion, canonicalState string,
 	}
 
 	cq := &CompiledQuestion{
-		ID:         q.ID,
-		Type:       q.Type,
-		Candidates: cands,
-		Reduction:  reduction,
+		ID:           q.ID,
+		Type:         q.Type,
+		Instructions: instructions,
+		Candidates:   cands,
+		Reduction:    reduction,
+	}
+	if text, ok := q.Instructions.(string); ok {
+		cq.Instructions = text
 	}
 
 	if tmpl := promptTemplate(prompt); tmpl != "" {
@@ -355,6 +374,10 @@ func (c *Compiler) mapCandidates(q *jev.ParsedQuestion) ([]Candidate, Reduction,
 	alphabets := c.Config.LabelAlphabets
 	if len(alphabets) == 0 {
 		alphabets = defaultAlphabets
+	}
+	pickLabels := pickLabels
+	if c.unlabeled {
+		pickLabels = func(_ [][]string, n int) ([]string, error) { return make([]string, n), nil }
 	}
 
 	switch q.Type {
